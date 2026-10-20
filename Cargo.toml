@@ -1,0 +1,41 @@
+[package]
+name = "tower-worker-fetch"
+version = "0.1.0"
+description = "A tower::Service over the Cloudflare Workers fetch API, typed with the http crate"
+edition = "2021"
+rust-version = "1.91"
+license = "MIT OR Apache-2.0"
+repository = "https://github.com/sagikazarmark/tower-worker-fetch"
+keywords = ["tower", "cloudflare", "workers", "fetch", "http"]
+categories = ["web-programming::http-client", "wasm", "asynchronous"]
+
+[workspace]
+members = ["examples/smoke"]
+
+[dependencies]
+bytes = "1"
+http = "1"
+http-body = "1"
+pin-project-lite = "0.2"
+tower-service = "0.3"
+worker = { version = "0.8.7", features = ["http"] }
+# `worker` enables these too; declared so this crate does not depend on that staying true.
+web-sys = { version = "0.3", features = ["AbortSignal", "Request", "Response", "WorkerGlobalScope"] }
+
+[dev-dependencies]
+http-body-util = "0.1"
+tower = { version = "0.5", default-features = false, features = ["util"] }
+
+[package.metadata.docs.rs]
+default-target = "wasm32-unknown-unknown"
+targets = ["wasm32-unknown-unknown", "x86_64-unknown-linux-gnu"]
+
+# For the smoke Worker's wasm (`worker-build --release`); irrelevant to the library.
+[profile.release]
+opt-level = "s"
+
+[package.metadata.release]
+sign-commit = true
+sign-tag = true
+tag-message = "Release {{version}}"
+tag-name = "v{{version}}"
