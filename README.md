@@ -42,7 +42,7 @@ let body = resp.into_body().collect().await?.to_bytes();
 | Response | `http::Response<reqwest::Body>` | `http::Response<tower_worker_fetch::Body>` (streaming) |
 | Error | `reqwest::Error` | `tower_worker_fetch::Error` (stage + JS error name/code/message, `Into<BoxError>`) |
 | Transport | reqwest / hyper | Workers `fetch`, or a `worker::Fetcher` service binding |
-| Cancellation | tower layers / tokio | `AbortSignal` in request extensions |
+| Cancellation | tower layers / tokio, cancel on drop | `AbortSignal` in request extensions, cancel on drop |
 | Target | native | `wasm32-unknown-unknown` on Cloudflare Workers |
 
 The crate is deliberately glue: request and response conversion come from
@@ -99,6 +99,18 @@ are both `true` (the runtime aborts with a `TimeoutError`, as the spec says). Th
 alternative is racing the response future against `worker::Delay` with
 `futures_util::future::select`.
 
+### Cancel on drop
+
+As with reqwest, dropping the response future before it resolves aborts the fetch,
+and dropping the response `Body` before end of stream cancels the underlying
+`ReadableStream`. Nothing is required of you: every fetch gets its own
+`AbortController`, combined with your `AbortSignal` extension (if any) via
+`AbortSignal.any`. A body read to the end, or an empty one, has nothing left to
+cancel. `Body::into_inner` disarms this: the returned `worker::Body` is on its own.
+
+This abort is never observable as an `Error`: by the time it fires nothing is polling,
+so `is_abort()` keeps meaning "the caller's signal fired".
+
 ## Request extensions
 
 The service honours exactly one request extension in 0.1:
@@ -124,7 +136,8 @@ upstream rejects chunked requests, set `content-length` explicitly.
 
 **Response.** `tower_worker_fetch::Body` implements `http_body::Body<Data = Bytes, Error = Error>`
 and streams. Collect it with `http_body_util::BodyExt::collect`, or read it frame by
-frame with `BodyExt::frame`. `Body::into_inner` gives you the underlying `worker::Body`.
+frame with `BodyExt::frame`. `Body::into_inner` gives you the underlying `worker::Body`
+and disarms cancel-on-drop for it (see [Cancel on drop](#cancel-on-drop)).
 
 ## Errors
 
@@ -142,9 +155,11 @@ errors further: a connect or read timeout is a plain fetch failure, not `is_time
 - `FetchService` holds a JavaScript handle (`JsValue`). wasm-bindgen marks `JsValue`
   `Send + Sync` on targets without the `atomics` feature, which is every Workers build.
 - `ResponseFuture` wraps the in-flight future in `worker::send::SendFuture`. The future
-  holds a `JsFuture` (`Rc`-based, `!Send`) and, until the request has been converted,
-  your request body `B`, which has no `Send` bound.
-- `Body` is `worker::Body`, which `worker` marks `Send + Sync` itself.
+  holds a `JsFuture` (`Rc`-based, `!Send`), the per-fetch `AbortController` handle
+  behind cancel-on-drop (a `JsValue`, as above) and, until the request has been
+  converted, your request body `B`, which has no `Send` bound.
+- `Body` is `worker::Body`, which `worker` marks `Send + Sync` itself, plus the same
+  `AbortController` handle once the response has arrived.
 
 The reasoning is the one the `worker` crate uses throughout: Workers is single-threaded,
 so these values never leave the isolate's thread. This crate contains no `unsafe` code

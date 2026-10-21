@@ -13,6 +13,7 @@ use worker::wasm_bindgen::{JsCast, JsValue};
 use worker::wasm_bindgen_futures::JsFuture;
 use worker::{js_sys, worker_sys};
 
+use crate::abort::{self, AbortGuard};
 use crate::body::Body;
 use crate::error::{Error, Stage};
 
@@ -90,10 +91,15 @@ where
     }
 }
 
-async fn fetch<B>(target: Target, req: http::Request<B>) -> Result<Response, Error>
+async fn fetch<B>(target: Target, mut req: http::Request<B>) -> Result<Response, Error>
 where
     B: http_body::Body<Data = Bytes> + 'static,
 {
+    // Lives in this future's state until the response arrives, then moves
+    // into the body: dropping either before completion aborts the fetch.
+    let mut guard = AbortGuard::new();
+    abort::add_signal(req.extensions_mut(), guard.signal());
+
     // Removes `AbortSignal` from the extensions and sets it on the Request;
     // streams the body (see the crate docs on request bodies).
     let request: web_sys::Request =
@@ -108,9 +114,15 @@ where
             .map_err(|e| Error::from_js(Stage::Fetch, e))?,
     };
 
-    let value = JsFuture::from(promise)
-        .await
-        .map_err(|e| Error::from_js(Stage::Fetch, e))?;
+    let result = JsFuture::from(promise).await;
+    let value = match result {
+        Ok(value) => value,
+        Err(e) => {
+            // The fetch is already over; aborting now would be noise.
+            guard.disarm();
+            return Err(Error::from_js(Stage::Fetch, e));
+        }
+    };
     let response: web_sys::Response = value.dyn_into().map_err(|_| {
         Error::from_message(
             Stage::Fetch,
@@ -121,7 +133,7 @@ where
     let response =
         worker::response_from_wasm(response).map_err(|e| Error::from_worker(Stage::Response, e))?;
 
-    Ok(response.map(Body::new))
+    Ok(response.map(|body| Body::new(body, Some(guard))))
 }
 
 fn global_scope() -> web_sys::WorkerGlobalScope {
@@ -133,9 +145,14 @@ type BoxedResponseFuture = Pin<Box<dyn Future<Output = Result<Response, Error>>>
 pin_project! {
     /// The future returned by [`FetchService::call`].
     ///
+    /// Dropping it before it resolves aborts the fetch (the subrequest is
+    /// cancelled, as with reqwest). Once it has resolved, the response
+    /// [`Body`] takes over that role; see its documentation.
+    ///
     /// `Send + Sync` via [`worker::send::SendFuture`]: the boxed future inside
-    /// holds a `JsFuture` (`Rc`-based, `!Send`) and the caller's request body
-    /// until the request has been converted. See the crate documentation.
+    /// holds a `JsFuture` (`Rc`-based, `!Send`), the per-fetch
+    /// `AbortController` handle, and the caller's request body until the
+    /// request has been converted. See the crate documentation.
     pub struct ResponseFuture {
         #[pin]
         inner: SendFuture<BoxedResponseFuture>,

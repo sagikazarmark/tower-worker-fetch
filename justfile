@@ -41,7 +41,7 @@ smoke url="http://127.0.0.1:8787" timeout="300":
     done
 
     failed=0
-    for route in test-get test-post test-stream test-abort test-timeout test-binding test-tower; do
+    for route in test-get test-post test-stream test-abort test-timeout test-drop-future test-drop-body test-binding test-tower; do
         body="$(curl --silent --show-error --write-out '\n%{http_code}' "{{ url }}/${route}" || true)"
         status="${body##*$'\n'}"
         body="${body%$'\n'*}"
