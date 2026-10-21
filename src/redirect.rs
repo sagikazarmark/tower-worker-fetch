@@ -5,8 +5,11 @@
 ///
 /// Insert it into `request.extensions_mut()`. The service sets it as the
 /// outgoing request's `redirect` mode and removes it from the extensions.
-/// Without it, or with [`Redirect::Follow`], the runtime follows redirects
-/// transparently and the caller never sees the 3xx.
+/// Without it, the mode is left as is: a request you build yourself has
+/// `follow` (redirects are followed transparently and you never see the
+/// 3xx); an *incoming* Worker request you forward has `manual`, which
+/// `worker` carries over, so the 3xx is passed back as-is. Insert the
+/// variant you want when that distinction matters.
 ///
 /// ```rust,no_run
 /// use tower_worker_fetch::Redirect;
@@ -22,10 +25,7 @@
 /// `response.status().is_redirection()`.
 ///
 /// `worker::RequestRedirect` in the extensions is **not** honoured; use this
-/// type. One case where that matters: an *incoming* Worker request has
-/// redirect mode `manual`, and `worker` carries that over when you forward it
-/// through this service. Insert [`Redirect::Follow`] explicitly if you want
-/// a proxied request to follow redirects.
+/// type.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Redirect {
     /// Follow redirects; the response is the one at the end of the chain.

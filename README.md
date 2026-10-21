@@ -123,10 +123,13 @@ so `is_abort()` keeps meaning "the caller's signal or `Timeout` fired".
 
 ### Redirects
 
-By default the runtime follows redirects and you never see the 3xx. Put
-`Redirect::Manual` in the request extensions to get the redirect response itself,
-status and `Location` header intact (workerd returns the real response, not a
-browser-style opaque one):
+Without a `Redirect` extension the service leaves the request's redirect mode alone. A
+request you build yourself has `follow`: redirects are followed and you never see the
+3xx. An *incoming* Worker request you forward has `manual`, which `worker` carries over,
+so the 3xx is passed back as-is (what a plain `fetch(request)` proxy does in JS). Insert
+the variant you want when that distinction matters. `Redirect::Manual` gets you the
+redirect response itself, status and `Location` header intact (workerd returns the real
+response, not a browser-style opaque one):
 
 ```rust,no_run
 use tower_worker_fetch::Redirect;
@@ -174,10 +177,7 @@ The service honours three request extensions in 0.1:
 
 `worker::RequestRedirect` in extensions is **ignored**: `worker` has two
 `RequestRedirect` types and its request conversion reads the private one, so there is
-no way for a caller to set it. Use `Redirect` instead. One consequence: an *incoming*
-Worker request has redirect mode `manual`, and `worker` carries that over when you
-forward it through this service, so a proxied request returns 3xx responses as-is
-unless you insert `Redirect::Follow`. `worker::Cf` is passed through
+no way for a caller to set it. Use `Redirect` instead. `worker::Cf` is passed through
 unchanged but is the metadata of an *incoming* request, not an outbound option; this
 crate makes no promise about it. Outbound `cf` options (`cacheTtl`, `resolveOverride`,
 ...) are a candidate for a later release.
