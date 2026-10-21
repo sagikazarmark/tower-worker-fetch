@@ -12,16 +12,19 @@ compile_error!(
 mod abort;
 mod body;
 mod error;
+mod redirect;
 mod service;
 
 pub use abort::Timeout;
 pub use body::Body;
 pub use error::{Error, Stage};
+pub use redirect::Redirect;
 pub use service::{FetchService, Response, ResponseFuture};
 
 /// Request extension types honoured by [`FetchService`], re-exported from
 /// [`worker`] so callers do not need a direct `worker` dependency for the
-/// common case. For a plain timeout, see [`Timeout`].
+/// common case. For a plain timeout, see [`Timeout`]; for redirect handling,
+/// see [`Redirect`].
 ///
 /// Insert a [`worker::AbortSignal`] into `request.extensions_mut()` to make
 /// the fetch cancellable:

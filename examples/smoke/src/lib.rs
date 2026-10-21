@@ -18,7 +18,9 @@ use http_body_util::{BodyExt, Empty, Full};
 use serde::{Deserialize, Serialize};
 use tower::util::BoxCloneService;
 use tower::{Service as _, ServiceBuilder, ServiceExt as _};
-use tower_worker_fetch::{AbortController, AbortSignal, Body, Error, FetchService, Stage, Timeout};
+use tower_worker_fetch::{
+    AbortController, AbortSignal, Body, Error, FetchService, Redirect, Stage, Timeout,
+};
 use worker::js_sys::{Function, Promise, Reflect};
 use worker::wasm_bindgen::closure::Closure;
 use worker::wasm_bindgen::{JsCast as _, JsValue};
@@ -40,6 +42,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<SmokeRespons
         "/echo" => echo(req).await,
         "/echo-stream" => echo_stream(&req),
         "/slow" => slow(&req).await,
+        "/redirect" => redirect(),
 
         "/test-get" => report(test_get(&origin).await),
         "/test-post" => report(test_post(&origin).await),
@@ -49,6 +52,9 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<SmokeRespons
         "/test-timeout-ext" => report(test_timeout_ext(&origin).await),
         "/test-timeout-with-signal" => report(test_timeout_with_signal(&origin).await),
         "/test-timeout-ok" => report(test_timeout_ok(&origin).await),
+        "/test-redirect" => report(test_redirect(&origin).await),
+        "/test-redirect-binding" => report(test_redirect_binding(&origin, &env).await),
+        "/test-redirect-proxy" => report(test_redirect_proxy(req, &origin).await),
         "/test-drop-future" => report(test_drop_future(&origin, &env).await),
         "/test-drop-body" => report(test_drop_body(&origin).await),
         "/test-binding" => report(test_binding(&origin, &env).await),
@@ -120,6 +126,17 @@ async fn slow(req: &HttpRequest) -> Result<SmokeResponse> {
 /// inside one isolate under `wrangler dev`, so a test route can read what the
 /// handler it called managed to do. Only deltas are meaningful.
 static SLOW_COMPLETED: AtomicU32 = AtomicU32::new(0);
+
+/// Where `/redirect` sends you: same-origin, relative, so the test can check
+/// the header without knowing the origin.
+const REDIRECT_LOCATION: &str = "/echo";
+
+fn redirect() -> Result<SmokeResponse> {
+    Ok(http::Response::builder()
+        .status(http::StatusCode::FOUND)
+        .header("location", REDIRECT_LOCATION)
+        .body(full(Bytes::from_static(b"redirecting")))?)
+}
 
 // ---------------------------------------------------------------------------
 // Observing the outgoing fetch
@@ -316,6 +333,76 @@ async fn test_timeout_ok(origin: &str) -> TestResult {
     Ok(serde_json::json!({ "ok": true, "bytes": collected.len() }))
 }
 
+/// `Redirect` through global fetch, plus the two things the re-wrap must
+/// preserve: the streamed body and the signal.
+async fn test_redirect(origin: &str) -> TestResult {
+    redirect_modes(FetchService::new(), origin).await?;
+
+    // Manual + POST body against `/echo`: the re-wrapped Request carries
+    // the streamed body.
+    const PAYLOAD: &[u8] = b"manual redirect body";
+    let mut req = http::Request::post(format!("{origin}/echo"))
+        .body(Full::new(Bytes::from_static(PAYLOAD)))?;
+    req.extensions_mut().insert(Redirect::Manual);
+    let resp = FetchService::new().oneshot(req).await?;
+    ensure(resp.status() == http::StatusCode::OK, "post status 200")?;
+    let echo: Echo = read_json(resp.into_body()).await?;
+    ensure(echo.method == "POST", "method is POST")?;
+    let body = base64::engine::general_purpose::STANDARD.decode(&echo.body_b64)?;
+    ensure(body == PAYLOAD, "body round-trips through the re-wrap")?;
+
+    // Manual + aborted signal: the re-wrapped Request carries the signal.
+    expect_cancelled(
+        origin,
+        |ext| {
+            ext.insert(Redirect::Manual);
+            ext.insert(AbortSignal::abort());
+        },
+        Cancellation::Abort,
+    )
+    .await?;
+
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+async fn test_redirect_binding(origin: &str, env: &Env) -> TestResult {
+    redirect_modes(FetchService::from(env.service("SELF")?), origin).await?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Forwarding the *incoming* request: `worker` carries its `manual` redirect
+/// mode over. Without an extension the 302 comes back; an explicit
+/// `Redirect::Follow` overrides the inherited mode and follows it.
+async fn test_redirect_proxy(incoming: HttpRequest, origin: &str) -> TestResult {
+    let (parts, _) = incoming.into_parts();
+    let forward = |redirect: Option<Redirect>| {
+        let mut req = http::Request::from_parts(parts.clone(), Empty::<Bytes>::new());
+        *req.uri_mut() = format!("{origin}/redirect").parse()?;
+        if let Some(redirect) = redirect {
+            req.extensions_mut().insert(redirect);
+        }
+        Ok::<_, BoxError>(req)
+    };
+
+    let resp = FetchService::new().oneshot(forward(None)?).await?;
+    ensure(
+        resp.status() == http::StatusCode::FOUND,
+        "proxied without extension: inherited manual, status 302",
+    )?;
+    resp.into_body().collect().await?;
+
+    let resp = FetchService::new()
+        .oneshot(forward(Some(Redirect::Follow))?)
+        .await?;
+    ensure(
+        resp.status() == http::StatusCode::OK,
+        "proxied with Follow: status 200",
+    )?;
+    resp.into_body().collect().await?;
+
+    Ok(serde_json::json!({ "ok": true }))
+}
+
 /// Dropping the response future mid-flight aborts the fetch: the outgoing
 /// Request's signal fires, and (through a service binding, where local
 /// workerd propagates it) the `/slow` handler is cancelled before it can
@@ -484,6 +571,44 @@ async fn echo_header_round_trip(svc: FetchService, origin: &str, marker: &str) -
         "x-smoke header round-trips",
     )?;
     Ok(serde_json::json!({ "ok": true }))
+}
+
+/// GET `/redirect` through `svc` three ways: `Manual` returns the 302 with its
+/// `Location`; `Follow` and no extension both end up at the 200 target.
+async fn redirect_modes(svc: FetchService, origin: &str) -> std::result::Result<(), BoxError> {
+    let request = |redirect: Option<Redirect>| {
+        let mut req =
+            http::Request::get(format!("{origin}/redirect")).body(Empty::<Bytes>::new())?;
+        if let Some(redirect) = redirect {
+            req.extensions_mut().insert(redirect);
+        }
+        Ok::<_, http::Error>(req)
+    };
+
+    let resp = svc
+        .clone()
+        .oneshot(request(Some(Redirect::Manual))?)
+        .await?;
+    ensure(
+        resp.status() == http::StatusCode::FOUND,
+        "manual: status 302",
+    )?;
+    ensure(
+        resp.headers().get("location").map(|v| v.as_bytes()) == Some(REDIRECT_LOCATION.as_bytes()),
+        "manual: Location header intact",
+    )?;
+    resp.into_body().collect().await?;
+
+    for (redirect, what) in [
+        (Some(Redirect::Follow), "follow: status 200"),
+        (None, "no extension: status 200"),
+    ] {
+        let resp = svc.clone().oneshot(request(redirect)?).await?;
+        ensure(resp.status() == http::StatusCode::OK, what)?;
+        let echo: Echo = read_json(resp.into_body()).await?;
+        ensure(echo.method == "GET", "followed to /echo")?;
+    }
+    Ok(())
 }
 
 #[derive(Clone, Copy)]

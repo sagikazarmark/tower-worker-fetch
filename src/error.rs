@@ -9,7 +9,7 @@ use worker::wasm_bindgen::JsValue;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 #[non_exhaustive]
 pub enum Stage {
-    /// Converting the `http::Request` into a `web_sys::Request`.
+    /// Building the outgoing `web_sys::Request` from the `http::Request`.
     Request,
     /// The `fetch` call itself: network errors, aborts, a service binding
     /// throwing, the returned value not being a `Response`.
