@@ -139,6 +139,13 @@ req.extensions_mut().insert(Redirect::Manual);
 # }
 ```
 
+**`follow` forwards every header to the redirect target**, including `Cookie`,
+`Authorization` and any signed or application-specific headers, even when the target is
+another host. Workers does not strip them the way a browser would. If the upstream is
+not fully trusted to redirect only where you would send those credentials, use
+`Redirect::Manual` and decide what to do with the `Location` yourself; this is also
+why forwarded incoming requests arrive in `manual` mode.
+
 There is no `error` mode: workerd rejects `redirect: "error"` as not making sense at
 the edge and tells you to use `manual` and check the status code. To fail on redirects,
 do that in a layer:

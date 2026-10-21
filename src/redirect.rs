@@ -30,6 +30,12 @@
 pub enum Redirect {
     /// Follow redirects; the response is the one at the end of the chain.
     /// The runtime default for a new request.
+    ///
+    /// Every header, `Cookie` and `Authorization` included, is forwarded to
+    /// the redirect target even on another host; Workers does not strip
+    /// them the way a browser would. Use [`Redirect::Manual`] when the
+    /// upstream is not trusted to redirect only where those credentials may
+    /// go.
     #[default]
     Follow,
     /// Return the 3xx response as-is, `Location` header included. Unlike a
