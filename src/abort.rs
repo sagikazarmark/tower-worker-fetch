@@ -1,10 +1,66 @@
-//! Cancel-on-drop plumbing: an `AbortController` per fetch, and the step that
-//! merges its signal with whatever `AbortSignal` the caller supplied.
+//! Cancellation plumbing: the [`Timeout`] request extension, an
+//! `AbortController` per fetch, and the step that merges their signals with
+//! whatever `AbortSignal` the caller supplied.
 
 use std::fmt;
+use std::time::Duration;
 
 use worker::js_sys;
 use worker::wasm_bindgen::JsValue;
+
+/// Request extension: abort the fetch if it has not finished within the
+/// duration.
+///
+/// Insert it into `request.extensions_mut()`. The service turns it into an
+/// `AbortSignal.timeout()` on the outgoing request, combined with your
+/// [`AbortSignal`] extension (if any) via `AbortSignal.any`, so either one
+/// cancels the fetch. No `web-sys` dependency is needed on your side.
+///
+/// ```rust,no_run
+/// use std::time::Duration;
+/// use tower_worker_fetch::Timeout;
+///
+/// # fn example(req: &mut http::Request<()>) {
+/// req.extensions_mut().insert(Timeout(Duration::from_secs(10)));
+/// # }
+/// ```
+///
+/// **The timeout spans the whole exchange, including reading the body.** That
+/// is how `AbortSignal.timeout()` works: the timer is not stopped when the
+/// headers arrive. A timeout that fires before the response future resolves
+/// produces an [`Error`] with `stage() == Stage::Fetch`; one that fires while
+/// the [`Body`] is still streaming surfaces from the body with
+/// `stage() == Stage::Body`. Either way `is_timeout()` and `is_abort()` are
+/// both `true` (the runtime aborts with a `TimeoutError`).
+///
+/// The duration is rounded up to whole milliseconds, saturating at `u32::MAX`.
+/// The runtime's `setTimeout` caps delays at about 24.8 days regardless.
+///
+/// [`AbortSignal`]: crate::AbortSignal
+/// [`Error`]: crate::Error
+/// [`Body`]: crate::Body
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Timeout(pub Duration);
+
+impl Timeout {
+    /// Whole milliseconds, rounded up and saturated to `u32::MAX`: the
+    /// argument to `AbortSignal.timeout()`. Rounding up keeps a
+    /// sub-millisecond timeout from becoming `timeout(0)`, which would fire
+    /// before the fetch has had a chance to run.
+    pub(crate) fn millis(self) -> u32 {
+        u32::try_from(self.0.as_nanos().div_ceil(1_000_000)).unwrap_or(u32::MAX)
+    }
+}
+
+/// If the request carries a [`Timeout`] extension, remove it and fold the
+/// matching `AbortSignal.timeout()` into the request's cancellation (see
+/// [`add_signal`]).
+pub(crate) fn apply_timeout(extensions: &mut http::Extensions) {
+    if let Some(timeout) = extensions.remove::<Timeout>() {
+        let signal = web_sys::AbortSignal::timeout_with_u32(timeout.millis());
+        add_signal(extensions, signal);
+    }
+}
 
 /// Aborts a `web_sys::AbortController` when dropped, unless disarmed.
 ///
@@ -100,5 +156,51 @@ mod tests {
         let mut guard = AbortGuard { controller: None };
         guard.disarm();
         drop(guard);
+    }
+
+    #[test]
+    fn timeout_is_send_sync_copy_static() {
+        fn assert<T: Send + Sync + Copy + 'static>() {}
+        assert::<Timeout>();
+    }
+
+    #[test]
+    fn timeout_is_a_plain_value() {
+        // Constructible and comparable on the host, no wasm-bindgen involved.
+        let timeout = Timeout(Duration::from_secs(10));
+        let copy = timeout;
+        assert_eq!(timeout, copy);
+        assert_eq!(timeout.0, Duration::from_secs(10));
+        let mut extensions = http::Extensions::new();
+        extensions.insert(timeout);
+        assert_eq!(extensions.get::<Timeout>(), Some(&timeout));
+    }
+
+    #[test]
+    fn timeout_millis_round_up_and_saturate() {
+        assert_eq!(Timeout(Duration::ZERO).millis(), 0);
+        assert_eq!(Timeout(Duration::from_millis(1500)).millis(), 1500);
+        assert_eq!(Timeout(Duration::from_micros(500)).millis(), 1);
+        assert_eq!(Timeout(Duration::from_micros(1999)).millis(), 2);
+        assert_eq!(Timeout(Duration::from_micros(2000)).millis(), 2);
+        assert_eq!(
+            Timeout(Duration::from_millis(u64::from(u32::MAX))).millis(),
+            u32::MAX
+        );
+        assert_eq!(
+            Timeout(Duration::from_millis(u64::from(u32::MAX) + 1)).millis(),
+            u32::MAX
+        );
+        assert_eq!(Timeout(Duration::MAX).millis(), u32::MAX);
+    }
+
+    #[test]
+    fn apply_timeout_without_extension_is_a_no_op() {
+        // No JS runtime on the host: with no `Timeout` present nothing may
+        // reach `AbortSignal.timeout()`.
+        let mut extensions = http::Extensions::new();
+        extensions.insert(42u8);
+        apply_timeout(&mut extensions);
+        assert_eq!(extensions.get::<u8>(), Some(&42));
     }
 }

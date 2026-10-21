@@ -98,6 +98,7 @@ where
     // Lives in this future's state until the response arrives, then moves
     // into the body: dropping either before completion aborts the fetch.
     let mut guard = AbortGuard::new();
+    abort::apply_timeout(req.extensions_mut());
     abort::add_signal(req.extensions_mut(), guard.signal());
 
     // Removes `AbortSignal` from the extensions and sets it on the Request;

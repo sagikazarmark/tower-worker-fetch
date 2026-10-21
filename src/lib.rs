@@ -14,13 +14,14 @@ mod body;
 mod error;
 mod service;
 
+pub use abort::Timeout;
 pub use body::Body;
 pub use error::{Error, Stage};
 pub use service::{FetchService, Response, ResponseFuture};
 
 /// Request extension types honoured by [`FetchService`], re-exported from
 /// [`worker`] so callers do not need a direct `worker` dependency for the
-/// common case.
+/// common case. For a plain timeout, see [`Timeout`].
 ///
 /// Insert a [`worker::AbortSignal`] into `request.extensions_mut()` to make
 /// the fetch cancellable:
