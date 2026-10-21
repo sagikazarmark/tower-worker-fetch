@@ -148,7 +148,9 @@ errors further: a connect or read timeout is a plain fetch failure, not `is_time
 
 The reasoning is the one the `worker` crate uses throughout: Workers is single-threaded,
 so these values never leave the isolate's thread. This crate contains no `unsafe` code
-of its own. If you need the type system to say `!Send`, open an issue; a `!Send` twin
+of its own. Because the `Send` claims only hold without `atomics`, building for a wasm
+target with the `atomics` target feature enabled fails with a `compile_error!` that states
+this assumption. If you need the type system to say `!Send`, open an issue; a `!Send` twin
 would be additive.
 
 ## Host builds
