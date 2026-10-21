@@ -1,8 +1,6 @@
 { pkgs, config, ... }:
 
 {
-  dotenv.enable = true;
-
   packages = with pkgs; [
     just
 
@@ -29,6 +27,7 @@
   # `devenv up` serves the smoke Worker under `wrangler dev` (process `wrangler-smoke`).
   wrangler = {
     enable = true;
+
     dev.smoke.directory = "examples/smoke";
   };
 
