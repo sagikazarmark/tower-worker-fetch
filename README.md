@@ -43,6 +43,7 @@ let body = resp.into_body().collect().await?.to_bytes();
 | Error | `reqwest::Error` | `tower_worker_fetch::Error` (stage + JS error name/code/message, `Into<BoxError>`) |
 | Transport | reqwest / hyper | Workers `fetch`, or a `worker::Fetcher` service binding |
 | Cancellation | tower layers / tokio, cancel on drop | `Timeout` / `AbortSignal` in request extensions, cancel on drop |
+| Redirects | `reqwest::redirect::Policy` | `Redirect::Follow` / `Redirect::Manual` in request extensions |
 | Target | native | `wasm32-unknown-unknown` on Cloudflare Workers |
 
 The crate is deliberately glue: request and response conversion come from
@@ -120,23 +121,63 @@ cancel. `Body::into_inner` disarms this: the returned `worker::Body` is on its o
 This abort is never observable as an `Error`: by the time it fires nothing is polling,
 so `is_abort()` keeps meaning "the caller's signal or `Timeout` fired".
 
+### Redirects
+
+By default the runtime follows redirects and you never see the 3xx. Put
+`Redirect::Manual` in the request extensions to get the redirect response itself,
+status and `Location` header intact (workerd returns the real response, not a
+browser-style opaque one):
+
+```rust,no_run
+use tower_worker_fetch::Redirect;
+
+# fn example(req: &mut http::Request<()>) {
+req.extensions_mut().insert(Redirect::Manual);
+# }
+```
+
+There is no `error` mode: workerd rejects `redirect: "error"` as not making sense at
+the edge and tells you to use `manual` and check the status code. To fail on redirects,
+do that in a layer:
+
+```rust,no_run
+use tower::ServiceBuilder;
+use tower_worker_fetch::{Body, Error, FetchService, Redirect};
+
+# fn example() {
+let svc = ServiceBuilder::new()
+    .map_request(|mut req: http::Request<http_body_util::Full<bytes::Bytes>>| {
+        req.extensions_mut().insert(Redirect::Manual); // every request
+        req
+    })
+    .map_result(|result: Result<http::Response<Body>, Error>| match result {
+        Ok(resp) if resp.status().is_redirection() => Err("redirect refused".into()),
+        Ok(resp) => Ok(resp),
+        Err(err) => Err(Box::<dyn std::error::Error + Send + Sync>::from(err)),
+    })
+    .service(FetchService::new());
+# let _ = svc;
+# }
+```
+
 ## Request extensions
 
-The service honours two request extensions in 0.1:
+The service honours three request extensions in 0.1:
 
 | Extension | Effect |
 |---|---|
 | `Timeout(Duration)` | The fetch is aborted with a `TimeoutError` once the duration has elapsed, body included |
 | [`AbortSignal`](https://docs.rs/worker/latest/worker/struct.AbortSignal.html) | Set as the request's `signal`; aborting it cancels the fetch |
+| `Redirect` | `Follow` (default) or `Manual`; set as the request's `redirect` mode |
 
-Both may be present; they are combined with `AbortSignal.any`.
+`Timeout` and `AbortSignal` may both be present; they are combined with `AbortSignal.any`.
 
 `worker::RequestRedirect` in extensions is **ignored**: `worker` has two
 `RequestRedirect` types and its request conversion reads the private one, so there is
-no way for a caller to set it. `worker::Cf` is passed through unchanged but is the
-metadata of an *incoming* request, not an outbound option; this crate makes no promise
-about it. Redirect control and outbound `cf` options (`cacheTtl`, `resolveOverride`,
-...) are candidates for a later release.
+no way for a caller to set it. Use `Redirect` instead. `worker::Cf` is passed through
+unchanged but is the metadata of an *incoming* request, not an outbound option; this
+crate makes no promise about it. Outbound `cf` options (`cacheTtl`, `resolveOverride`,
+...) are a candidate for a later release.
 
 ## Bodies
 

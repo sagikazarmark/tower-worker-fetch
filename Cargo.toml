@@ -20,7 +20,7 @@ pin-project-lite = "0.2"
 tower-service = "0.3"
 worker = { version = "0.8.7", features = ["http"] }
 # `worker` enables these too; declared so this crate does not depend on that staying true.
-web-sys = { version = "0.3", features = ["AbortController", "AbortSignal", "Request", "Response", "WorkerGlobalScope"] }
+web-sys = { version = "0.3", features = ["AbortController", "AbortSignal", "Request", "RequestInit", "RequestRedirect", "Response", "WorkerGlobalScope"] }
 
 [dev-dependencies]
 http-body-util = "0.1"
