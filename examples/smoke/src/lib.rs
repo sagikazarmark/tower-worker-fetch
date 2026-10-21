@@ -4,7 +4,7 @@
 //! locally or in CI. Every `/test-*` route returns `200 {"ok":true,...}` on
 //! success and `500 {"ok":false,"error":...}` on failure. `run.sh` drives it.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::BTreeMap;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
@@ -156,6 +156,8 @@ fn redirect() -> Result<SmokeResponse> {
 
 thread_local! {
     static LAST_FETCH_SIGNAL: RefCell<Option<web_sys::AbortSignal>> = const { RefCell::new(None) };
+    /// Whether the most recent outgoing Request had a non-empty `cf` object.
+    static LAST_FETCH_HAS_CF: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Install the `globalThis.fetch` wrapper, once per isolate.
@@ -178,6 +180,15 @@ fn observe_fetch() {
                 .dyn_ref::<web_sys::Request>()
                 .map(web_sys::Request::signal);
             LAST_FETCH_SIGNAL.set(signal);
+            let has_cf = Reflect::get(&request, &JsValue::from_str("cf"))
+                .ok()
+                .filter(|cf| cf.is_object())
+                .is_some_and(|cf| {
+                    worker::js_sys::Object::keys(cf.unchecked_ref::<worker::js_sys::Object>())
+                        .length()
+                        > 0
+                });
+            LAST_FETCH_HAS_CF.set(has_cf);
             original
                 .call2(&this, &request, &init)
                 .expect("fetch does not throw synchronously")
@@ -317,20 +328,25 @@ async fn test_timeout_with_signal(origin: &str) -> TestResult {
 }
 
 /// A generous `Timeout` against a fast streaming route: no error, body reads
-/// to the end.
+/// to the end. Then the same with `Duration::MAX`, which saturates to
+/// `u32::MAX` ms, above the 2^31-1 ms `setTimeout` limit: the runtime must
+/// clamp it rather than overflow and fire at once.
 async fn test_timeout_ok(origin: &str) -> TestResult {
     const N: u32 = 5;
     let expected_len: usize = (0..N).map(|i| stream_chunk(i).len()).sum();
-    let mut req =
-        http::Request::get(format!("{origin}/echo-stream?n={N}")).body(Empty::<Bytes>::new())?;
-    req.extensions_mut()
-        .insert(Timeout(Duration::from_secs(30)));
+    let mut bytes = Vec::new();
+    for timeout in [Duration::from_secs(30), Duration::MAX] {
+        let mut req =
+            http::Request::get(format!("{origin}/echo-stream?n={N}")).body(Empty::<Bytes>::new())?;
+        req.extensions_mut().insert(Timeout(timeout));
 
-    let resp = FetchService::new().oneshot(req).await?;
-    ensure(resp.status() == http::StatusCode::OK, "status 200")?;
-    let collected = resp.into_body().collect().await?.to_bytes();
-    ensure(collected.len() == expected_len, "body read to the end")?;
-    Ok(serde_json::json!({ "ok": true, "bytes": collected.len() }))
+        let resp = FetchService::new().oneshot(req).await?;
+        ensure(resp.status() == http::StatusCode::OK, "status 200")?;
+        let collected = resp.into_body().collect().await?.to_bytes();
+        ensure(collected.len() == expected_len, "body read to the end")?;
+        bytes.push(collected.len());
+    }
+    Ok(serde_json::json!({ "ok": true, "bytes": bytes }))
 }
 
 /// `Redirect` through global fetch, plus the two things the re-wrap must
@@ -372,8 +388,10 @@ async fn test_redirect_binding(origin: &str, env: &Env) -> TestResult {
 
 /// Forwarding the *incoming* request: `worker` carries its `manual` redirect
 /// mode over. Without an extension the 302 comes back; an explicit
-/// `Redirect::Follow` overrides the inherited mode and follows it.
+/// `Redirect::Follow` overrides the inherited mode and follows it. The
+/// override re-wraps the Request, which must keep the incoming `cf` too.
 async fn test_redirect_proxy(incoming: HttpRequest, origin: &str) -> TestResult {
+    observe_fetch();
     let (parts, _) = incoming.into_parts();
     let forward = |redirect: Option<Redirect>| {
         let mut req = http::Request::from_parts(parts.clone(), Empty::<Bytes>::new());
@@ -390,6 +408,7 @@ async fn test_redirect_proxy(incoming: HttpRequest, origin: &str) -> TestResult 
         "proxied without extension: inherited manual, status 302",
     )?;
     resp.into_body().collect().await?;
+    let cf_untouched = LAST_FETCH_HAS_CF.get();
 
     let resp = FetchService::new()
         .oneshot(forward(Some(Redirect::Follow))?)
@@ -399,8 +418,13 @@ async fn test_redirect_proxy(incoming: HttpRequest, origin: &str) -> TestResult 
         "proxied with Follow: status 200",
     )?;
     resp.into_body().collect().await?;
+    let cf_rewrapped = LAST_FETCH_HAS_CF.get();
+    ensure(
+        cf_rewrapped == cf_untouched,
+        "re-wrapping for Redirect keeps `cf`",
+    )?;
 
-    Ok(serde_json::json!({ "ok": true }))
+    Ok(serde_json::json!({ "ok": true, "cf": cf_untouched }))
 }
 
 /// Dropping the response future mid-flight aborts the fetch: the outgoing

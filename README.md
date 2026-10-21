@@ -172,13 +172,13 @@ let svc = ServiceBuilder::new()
 
 ## Request extensions
 
-The service honours three request extensions in 0.1:
+The service honours three request extensions:
 
 | Extension | Effect |
 |---|---|
 | `Timeout(Duration)` | The fetch is aborted with a `TimeoutError` once the duration has elapsed, body included |
 | [`AbortSignal`](https://docs.rs/worker/latest/worker/struct.AbortSignal.html) | Set as the request's `signal`; aborting it cancels the fetch |
-| `Redirect` | `Follow` (default) or `Manual`; set as the request's `redirect` mode |
+| `Redirect` | `Follow` or `Manual`; set as the request's `redirect` mode (absent: left as-is, see Redirects) |
 
 `Timeout` and `AbortSignal` may both be present; they are combined with `AbortSignal.any`.
 

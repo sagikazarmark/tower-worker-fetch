@@ -98,6 +98,8 @@ where
 {
     // Lives in this future's state until the response arrives, then moves
     // into the body: dropping either before completion aborts the fetch.
+    // On an early error it drops armed: aborting a fetch that never started
+    // or has already resolved is a no-op.
     let mut guard = AbortGuard::new();
     abort::apply_timeout(req.extensions_mut());
     abort::add_signal(req.extensions_mut(), guard.signal());
@@ -113,10 +115,10 @@ where
     // headers and (streamed) body of the original. Without a `Redirect`
     // extension the request is left as `worker` produced it, mode included
     // (a proxied incoming request carries `manual`, see `Redirect`).
-    let request = match redirect {
-        Some(redirect) if request.redirect() != redirect.into() => {
+    let request = match redirect.map(web_sys::RequestRedirect::from) {
+        Some(mode) if request.redirect() != mode => {
             let init = web_sys::RequestInit::new();
-            init.set_redirect(redirect.into());
+            init.set_redirect(mode);
             web_sys::Request::new_with_request_and_init(&request, &init)
                 .map_err(|e| Error::from_js(Stage::Request, e))?
         }
