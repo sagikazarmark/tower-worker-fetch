@@ -2,6 +2,13 @@
 #![forbid(unsafe_code)]
 #![warn(missing_docs, missing_debug_implementations, rust_2018_idioms)]
 
+#[cfg(all(target_family = "wasm", target_feature = "atomics"))]
+compile_error!(
+    "tower-worker-fetch assumes single-threaded wasm without the `atomics` target feature: \
+     its JavaScript futures and handles are marked `Send + Sync` on that basis, which does not \
+     hold when `atomics` is enabled"
+);
+
 mod body;
 mod error;
 mod service;
