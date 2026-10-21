@@ -1,6 +1,6 @@
 [package]
 name = "tower-worker-fetch"
-version = "0.1.0"
+version = "0.2.0"
 description = "A tower::Service over the Cloudflare Workers fetch API, typed with the http crate"
 edition = "2021"
 rust-version = "1.91"
