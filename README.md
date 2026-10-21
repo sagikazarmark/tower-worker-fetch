@@ -42,7 +42,7 @@ let body = resp.into_body().collect().await?.to_bytes();
 | Response | `http::Response<reqwest::Body>` | `http::Response<tower_worker_fetch::Body>` (streaming) |
 | Error | `reqwest::Error` | `tower_worker_fetch::Error` (stage + JS error name/code/message, `Into<BoxError>`) |
 | Transport | reqwest / hyper | Workers `fetch`, or a `worker::Fetcher` service binding |
-| Cancellation | tower layers / tokio, cancel on drop | `AbortSignal` in request extensions, cancel on drop |
+| Cancellation | tower layers / tokio, cancel on drop | `Timeout` / `AbortSignal` in request extensions, cancel on drop |
 | Target | native | `wasm32-unknown-unknown` on Cloudflare Workers |
 
 The crate is deliberately glue: request and response conversion come from
@@ -82,21 +82,30 @@ first poll because there is no tokio runtime inside a Worker.
 
 ### Timeouts
 
-Use the platform's timer instead of `tower::timeout`. Put an `AbortSignal` with a
-timeout in the request extensions:
+Use the platform's timer instead of `tower::timeout`. Put a `Timeout` in the request
+extensions:
 
 ```rust,no_run
-use tower_worker_fetch::AbortSignal;
+use std::time::Duration;
+use tower_worker_fetch::Timeout;
 
 # fn example(req: &mut http::Request<()>) {
-let signal = AbortSignal::from(web_sys::AbortSignal::timeout_with_u32(10_000));
-req.extensions_mut().insert(signal);
+req.extensions_mut().insert(Timeout(Duration::from_secs(10)));
 # }
 ```
 
-A fetch cancelled this way fails with an `Error` whose `is_abort()` and `is_timeout()`
-are both `true` (the runtime aborts with a `TimeoutError`, as the spec says). The
-alternative is racing the response future against `worker::Delay` with
+The service turns it into an `AbortSignal.timeout()` on the outgoing request (whole
+milliseconds, rounded up, saturated to `u32::MAX`; the runtime's `setTimeout` caps at
+about 24.8 days regardless). A caller-built `AbortSignal` with a timeout in the
+extensions still works, and the two combine: either one cancels the fetch.
+
+The timeout spans the whole exchange, including reading the body; that is how
+`AbortSignal.timeout()` works. A timeout that fires before the headers arrive fails
+the response future with an `Error` whose `is_abort()` and `is_timeout()` are both
+`true` (the runtime aborts with a `TimeoutError`, as the spec says) and `stage() ==
+Stage::Fetch`. One that fires while the body is still streaming surfaces from the
+`Body` with `stage() == Stage::Body` and the same `is_timeout()`. The alternative is
+racing the response future against `worker::Delay` with
 `futures_util::future::select`.
 
 ### Cancel on drop
@@ -109,15 +118,18 @@ and dropping the response `Body` before end of stream cancels the underlying
 cancel. `Body::into_inner` disarms this: the returned `worker::Body` is on its own.
 
 This abort is never observable as an `Error`: by the time it fires nothing is polling,
-so `is_abort()` keeps meaning "the caller's signal fired".
+so `is_abort()` keeps meaning "the caller's signal or `Timeout` fired".
 
 ## Request extensions
 
-The service honours exactly one request extension in 0.1:
+The service honours two request extensions in 0.1:
 
 | Extension | Effect |
 |---|---|
+| `Timeout(Duration)` | The fetch is aborted with a `TimeoutError` once the duration has elapsed, body included |
 | [`AbortSignal`](https://docs.rs/worker/latest/worker/struct.AbortSignal.html) | Set as the request's `signal`; aborting it cancels the fetch |
+
+Both may be present; they are combined with `AbortSignal.any`.
 
 `worker::RequestRedirect` in extensions is **ignored**: `worker` has two
 `RequestRedirect` types and its request conversion reads the private one, so there is

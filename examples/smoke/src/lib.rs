@@ -18,7 +18,7 @@ use http_body_util::{BodyExt, Empty, Full};
 use serde::{Deserialize, Serialize};
 use tower::util::BoxCloneService;
 use tower::{Service as _, ServiceBuilder, ServiceExt as _};
-use tower_worker_fetch::{AbortSignal, Body, Error, FetchService, Stage};
+use tower_worker_fetch::{AbortController, AbortSignal, Body, Error, FetchService, Stage, Timeout};
 use worker::js_sys::{Function, Promise, Reflect};
 use worker::wasm_bindgen::closure::Closure;
 use worker::wasm_bindgen::{JsCast as _, JsValue};
@@ -46,6 +46,9 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<SmokeRespons
         "/test-stream" => report(test_stream(&origin).await),
         "/test-abort" => report(test_abort(&origin).await),
         "/test-timeout" => report(test_timeout(&origin).await),
+        "/test-timeout-ext" => report(test_timeout_ext(&origin).await),
+        "/test-timeout-with-signal" => report(test_timeout_with_signal(&origin).await),
+        "/test-timeout-ok" => report(test_timeout_ok(&origin).await),
         "/test-drop-future" => report(test_drop_future(&origin, &env).await),
         "/test-drop-body" => report(test_drop_body(&origin).await),
         "/test-binding" => report(test_binding(&origin, &env).await),
@@ -228,12 +231,89 @@ async fn test_stream(origin: &str) -> TestResult {
 }
 
 async fn test_abort(origin: &str) -> TestResult {
-    expect_cancelled(origin, AbortSignal::abort(), Cancellation::Abort).await
+    expect_cancelled(
+        origin,
+        |ext| {
+            ext.insert(AbortSignal::abort());
+        },
+        Cancellation::Abort,
+    )
+    .await
 }
 
+/// A caller-built `AbortSignal.timeout()`: the pre-`Timeout` way, kept working.
 async fn test_timeout(origin: &str) -> TestResult {
     let signal = AbortSignal::from(web_sys::AbortSignal::timeout_with_u32(50));
-    expect_cancelled(origin, signal, Cancellation::Timeout).await
+    expect_cancelled(
+        origin,
+        |ext| {
+            ext.insert(signal);
+        },
+        Cancellation::Timeout,
+    )
+    .await
+}
+
+/// The `Timeout` extension, with no `web_sys` in sight.
+async fn test_timeout_ext(origin: &str) -> TestResult {
+    expect_cancelled(
+        origin,
+        |ext| {
+            ext.insert(Timeout(Duration::from_millis(100)));
+        },
+        Cancellation::Timeout,
+    )
+    .await
+}
+
+/// `Timeout` plus a caller `AbortSignal`: whichever fires first wins, and the
+/// error says which one it was.
+async fn test_timeout_with_signal(origin: &str) -> TestResult {
+    // Caller aborts first, under a generous timeout.
+    let controller = AbortController::default();
+    let signal = controller.signal();
+    controller.abort();
+    expect_cancelled(
+        origin,
+        |ext| {
+            ext.insert(Timeout(Duration::from_secs(30)));
+            ext.insert(signal);
+        },
+        Cancellation::Abort,
+    )
+    .await?;
+
+    // Short timeout, caller signal never aborted.
+    let controller = AbortController::default();
+    let signal = controller.signal();
+    expect_cancelled(
+        origin,
+        |ext| {
+            ext.insert(signal);
+            ext.insert(Timeout(Duration::from_millis(100)));
+        },
+        Cancellation::Timeout,
+    )
+    .await?;
+
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// A generous `Timeout` against a fast streaming route: no error, body reads
+/// to the end.
+async fn test_timeout_ok(origin: &str) -> TestResult {
+    const N: u32 = 5;
+    let expected_len: usize = (0..N).map(|i| stream_chunk(i).len()).sum();
+    let mut req =
+        http::Request::get(format!("{origin}/echo-stream?n={N}")).body(Empty::<Bytes>::new())?;
+    req.extensions_mut()
+        .insert(Timeout(Duration::from_secs(30)));
+
+    let resp = FetchService::new().oneshot(req).await?;
+    ensure(resp.status() == http::StatusCode::OK, "status 200")?;
+    let collected = resp.into_body().collect().await?.to_bytes();
+    ensure(collected.len() == expected_len, "body read to the end")?;
+    Ok(serde_json::json!({ "ok": true, "bytes": collected.len() }))
 }
 
 /// Dropping the response future mid-flight aborts the fetch: the outgoing
@@ -412,12 +492,16 @@ enum Cancellation {
     Timeout,
 }
 
-/// Fetch a slow route with `signal` in the extensions and check the failure
-/// is reported as the expected kind of cancellation.
-async fn expect_cancelled(origin: &str, signal: AbortSignal, kind: Cancellation) -> TestResult {
+/// Fetch a slow route with the extensions `set` by the caller and check the
+/// failure is reported as the expected kind of cancellation.
+async fn expect_cancelled(
+    origin: &str,
+    set: impl FnOnce(&mut http::Extensions),
+    kind: Cancellation,
+) -> TestResult {
     let mut req =
         http::Request::get(format!("{origin}/slow?ms=5000")).body(Empty::<Bytes>::new())?;
-    req.extensions_mut().insert(signal);
+    set(req.extensions_mut());
 
     let err = expect_err(FetchService::new().oneshot(req).await)?;
     ensure_on(err.stage() == Stage::Fetch, "stage is Fetch", &err)?;
