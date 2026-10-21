@@ -22,11 +22,14 @@
 /// `response.status().is_redirection()`.
 ///
 /// `worker::RequestRedirect` in the extensions is **not** honoured; use this
-/// type.
+/// type. One case where that matters: an *incoming* Worker request has
+/// redirect mode `manual`, and `worker` carries that over when you forward it
+/// through this service. Insert [`Redirect::Follow`] explicitly if you want
+/// a proxied request to follow redirects.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Redirect {
     /// Follow redirects; the response is the one at the end of the chain.
-    /// The runtime default.
+    /// The runtime default for a new request.
     #[default]
     Follow,
     /// Return the 3xx response as-is, `Location` header included. Unlike a
@@ -40,16 +43,6 @@ impl From<Redirect> for web_sys::RequestRedirect {
             Redirect::Follow => web_sys::RequestRedirect::Follow,
             Redirect::Manual => web_sys::RequestRedirect::Manual,
         }
-    }
-}
-
-/// Remove the [`Redirect`] extension, if any. `Some` only when the outgoing
-/// request needs a mode other than the runtime default, so callers can leave
-/// the default path untouched.
-pub(crate) fn take_non_default(extensions: &mut http::Extensions) -> Option<Redirect> {
-    match extensions.remove::<Redirect>() {
-        Some(Redirect::Follow) | None => None,
-        Some(redirect) => Some(redirect),
     }
 }
 
@@ -69,16 +62,9 @@ mod tests {
     }
 
     #[test]
-    fn take_non_default_removes_the_extension() {
+    fn redirect_is_a_plain_value() {
         let mut extensions = http::Extensions::new();
-        assert_eq!(take_non_default(&mut extensions), None);
-
-        extensions.insert(Redirect::Follow);
-        assert_eq!(take_non_default(&mut extensions), None);
-        assert!(extensions.get::<Redirect>().is_none());
-
         extensions.insert(Redirect::Manual);
-        assert_eq!(take_non_default(&mut extensions), Some(Redirect::Manual));
-        assert!(extensions.get::<Redirect>().is_none());
+        assert_eq!(extensions.get::<Redirect>(), Some(&Redirect::Manual));
     }
 }

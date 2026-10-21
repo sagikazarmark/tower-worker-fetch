@@ -54,6 +54,7 @@ async fn fetch(req: HttpRequest, env: Env, _ctx: Context) -> Result<SmokeRespons
         "/test-timeout-ok" => report(test_timeout_ok(&origin).await),
         "/test-redirect" => report(test_redirect(&origin).await),
         "/test-redirect-binding" => report(test_redirect_binding(&origin, &env).await),
+        "/test-redirect-proxy" => report(test_redirect_proxy(req, &origin).await),
         "/test-drop-future" => report(test_drop_future(&origin, &env).await),
         "/test-drop-body" => report(test_drop_body(&origin).await),
         "/test-binding" => report(test_binding(&origin, &env).await),
@@ -366,6 +367,39 @@ async fn test_redirect(origin: &str) -> TestResult {
 
 async fn test_redirect_binding(origin: &str, env: &Env) -> TestResult {
     redirect_modes(FetchService::from(env.service("SELF")?), origin).await?;
+    Ok(serde_json::json!({ "ok": true }))
+}
+
+/// Forwarding the *incoming* request: `worker` carries its `manual` redirect
+/// mode over. Without an extension the 302 comes back; an explicit
+/// `Redirect::Follow` overrides the inherited mode and follows it.
+async fn test_redirect_proxy(incoming: HttpRequest, origin: &str) -> TestResult {
+    let (parts, _) = incoming.into_parts();
+    let forward = |redirect: Option<Redirect>| {
+        let mut req = http::Request::from_parts(parts.clone(), Empty::<Bytes>::new());
+        *req.uri_mut() = format!("{origin}/redirect").parse()?;
+        if let Some(redirect) = redirect {
+            req.extensions_mut().insert(redirect);
+        }
+        Ok::<_, BoxError>(req)
+    };
+
+    let resp = FetchService::new().oneshot(forward(None)?).await?;
+    ensure(
+        resp.status() == http::StatusCode::FOUND,
+        "proxied without extension: inherited manual, status 302",
+    )?;
+    resp.into_body().collect().await?;
+
+    let resp = FetchService::new()
+        .oneshot(forward(Some(Redirect::Follow))?)
+        .await?;
+    ensure(
+        resp.status() == http::StatusCode::OK,
+        "proxied with Follow: status 200",
+    )?;
+    resp.into_body().collect().await?;
+
     Ok(serde_json::json!({ "ok": true }))
 }
 

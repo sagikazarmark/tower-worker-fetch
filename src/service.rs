@@ -16,7 +16,7 @@ use worker::{js_sys, worker_sys};
 use crate::abort::{self, AbortGuard};
 use crate::body::Body;
 use crate::error::{Error, Stage};
-use crate::redirect;
+use crate::redirect::Redirect;
 
 /// The response type of [`FetchService`]: an `http::Response` with a
 /// streaming [`Body`].
@@ -101,25 +101,26 @@ where
     let mut guard = AbortGuard::new();
     abort::apply_timeout(req.extensions_mut());
     abort::add_signal(req.extensions_mut(), guard.signal());
-    let redirect = redirect::take_non_default(req.extensions_mut());
+    let redirect = req.extensions_mut().remove::<Redirect>();
 
     // Removes `AbortSignal` from the extensions and sets it on the Request;
     // streams the body (see the crate docs on request bodies).
     let request: web_sys::Request =
         worker::request_to_wasm(req).map_err(|e| Error::from_worker(Stage::Request, e))?;
 
-    // A Request's `redirect` is read-only, so a non-default mode means
+    // A Request's `redirect` is read-only, so a different mode means
     // re-wrapping: `new Request(request, { redirect })` keeps the signal,
-    // headers and (streamed) body of the original. Only done when needed so
-    // the default path stays byte-for-byte what `worker` produced.
+    // headers and (streamed) body of the original. Without a `Redirect`
+    // extension the request is left as `worker` produced it, mode included
+    // (a proxied incoming request carries `manual`, see `Redirect`).
     let request = match redirect {
-        None => request,
-        Some(redirect) => {
+        Some(redirect) if request.redirect() != redirect.into() => {
             let init = web_sys::RequestInit::new();
             init.set_redirect(redirect.into());
             web_sys::Request::new_with_request_and_init(&request, &init)
                 .map_err(|e| Error::from_js(Stage::Request, e))?
         }
+        _ => request,
     };
 
     // No `RequestInit` on the fetch call itself, so the Request's own

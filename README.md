@@ -174,7 +174,10 @@ The service honours three request extensions in 0.1:
 
 `worker::RequestRedirect` in extensions is **ignored**: `worker` has two
 `RequestRedirect` types and its request conversion reads the private one, so there is
-no way for a caller to set it. Use `Redirect` instead. `worker::Cf` is passed through
+no way for a caller to set it. Use `Redirect` instead. One consequence: an *incoming*
+Worker request has redirect mode `manual`, and `worker` carries that over when you
+forward it through this service, so a proxied request returns 3xx responses as-is
+unless you insert `Redirect::Follow`. `worker::Cf` is passed through
 unchanged but is the metadata of an *incoming* request, not an outbound option; this
 crate makes no promise about it. Outbound `cf` options (`cacheTtl`, `resolveOverride`,
 ...) are a candidate for a later release.
