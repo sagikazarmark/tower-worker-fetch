@@ -7,6 +7,7 @@ use bytes::Bytes;
 use http_body::{Frame, SizeHint};
 use pin_project_lite::pin_project;
 
+use crate::abort::AbortGuard;
 use crate::error::{Error, Stage};
 
 pin_project! {
@@ -23,23 +24,46 @@ pin_project! {
     /// Collect it with [`http_body_util::BodyExt::collect`] or consume it
     /// frame by frame with [`http_body_util::BodyExt::frame`].
     ///
+    /// Dropping a `Body` before it has reached end of stream aborts the fetch
+    /// it came from, which cancels the underlying `ReadableStream`. A body
+    /// that has been read to the end (or that was empty to begin with) has
+    /// nothing left to cancel.
+    ///
     /// [`http_body_util::BodyExt::collect`]: https://docs.rs/http-body-util/latest/http_body_util/trait.BodyExt.html#method.collect
     /// [`http_body_util::BodyExt::frame`]: https://docs.rs/http-body-util/latest/http_body_util/trait.BodyExt.html#method.frame
     #[derive(Debug)]
     pub struct Body {
         #[pin]
         inner: worker::Body,
+        // Aborts the fetch on drop until the stream is finished or the body
+        // is unwrapped with `into_inner`. `None` for bodies with nothing to
+        // cancel.
+        guard: Option<AbortGuard>,
     }
 }
 
 impl Body {
-    pub(crate) fn new(inner: worker::Body) -> Self {
-        Self { inner }
+    pub(crate) fn new(inner: worker::Body, guard: Option<AbortGuard>) -> Self {
+        // An empty body never reaches `poll_frame`, so it would never disarm.
+        let guard = if http_body::Body::is_end_stream(&inner) {
+            None
+        } else {
+            guard
+        };
+        Self { inner, guard }
     }
 
     /// Unwrap into the underlying [`worker::Body`], for callers who want the
     /// raw `ReadableStream` (`worker::Body::into_inner`) or a `worker::Error`.
-    pub fn into_inner(self) -> worker::Body {
+    ///
+    /// This disarms cancel-on-drop: the returned `worker::Body` is no longer
+    /// tied to the fetch, so dropping it half-read does not abort anything.
+    /// Use the caller-supplied [`AbortSignal`](crate::AbortSignal) extension
+    /// if you still need to cancel the stream.
+    pub fn into_inner(mut self) -> worker::Body {
+        if let Some(guard) = &mut self.guard {
+            guard.disarm();
+        }
         self.inner
     }
 }
@@ -53,10 +77,18 @@ impl http_body::Body for Body {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
-        self.project()
+        let this = self.project();
+        let polled = this
             .inner
             .poll_frame(cx)
-            .map_err(|e| Error::from_worker(Stage::Body, e))
+            .map_err(|e| Error::from_worker(Stage::Body, e));
+        // End of stream or a stream error: the fetch is over, nothing to cancel.
+        if matches!(polled, Poll::Ready(None | Some(Err(_)))) {
+            if let Some(guard) = this.guard {
+                guard.disarm();
+            }
+        }
+        polled
     }
 
     #[inline]
@@ -83,7 +115,7 @@ mod tests {
 
     #[test]
     fn empty_body_delegates() {
-        let body = Body::new(worker::Body::empty());
+        let body = Body::new(worker::Body::empty(), None);
         assert!(body.is_end_stream());
         assert_eq!(body.size_hint().exact(), Some(0));
 
@@ -98,7 +130,7 @@ mod tests {
 
     #[test]
     fn into_inner_round_trips() {
-        let body = Body::new(worker::Body::empty());
+        let body = Body::new(worker::Body::empty(), None);
         let inner = body.into_inner();
         assert!(inner.is_end_stream());
     }

@@ -9,6 +9,7 @@ compile_error!(
      hold when `atomics` is enabled"
 );
 
+mod abort;
 mod body;
 mod error;
 mod service;
