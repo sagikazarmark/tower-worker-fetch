@@ -4,7 +4,7 @@ default:
     @just --list --unsorted
 
 # Run all CI jobs (except the smoke test: `devenv test`).
-ci: fmt clippy test doc deny
+ci: fmt clippy test package doc deny
 
 # Check formatting.
 fmt:
@@ -18,6 +18,13 @@ clippy:
 # Run tests.
 test:
     cargo test --workspace --locked
+
+# `cargo publish` without uploading, as the Release workflow packages: catches files missing from
+# the package and dev-dependencies that `cargo publish` strips. It skips the smoke Worker
+# (`publish = false`).
+[doc("Build the crate from its packaged sources.")]
+package:
+    cargo publish --dry-run --workspace --locked
 
 # Run rustdoc, on the host and on wasm32.
 [env("RUSTDOCFLAGS", "--deny warnings")]
