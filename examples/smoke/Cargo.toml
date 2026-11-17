@@ -10,7 +10,7 @@ crate-type = ["cdylib"]
 [dependencies]
 tower-worker-fetch = { path = "../.." }
 
-worker = { version = "0.8.7", features = ["http"] }
+worker = { version = "0.9", features = ["http"] }
 bytes = "1"
 http = "1"
 http-body = "1"
