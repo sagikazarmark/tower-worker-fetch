@@ -20,3 +20,10 @@ wildcards = "warn"
 [sources]
 unknown-registry = "deny"
 unknown-git = "deny"
+
+[advisories]
+ignore = [
+  # `worker` depends on chrono unconditionally, so it cannot be dropped from here.
+  # https://github.com/cloudflare/workers-rs/issues/77
+  { id = "RUSTSEC-2026-0543", reason = "chrono is unmaintained; a required dependency of worker" },
+]
